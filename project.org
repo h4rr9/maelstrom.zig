@@ -1,0 +1,7 @@
+#+title: maelstrom
+#+author: Hariganesh Srinivasan
+#+email: hariganeshs1999@gmail.com
+#+date: <2025-03-16 Sun>
+
+* PROJECT maelstrom
+** TODO <First Task>

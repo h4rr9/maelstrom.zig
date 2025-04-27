@@ -14,6 +14,8 @@ pub const ErrorType = enum(u16) {
     txn_conflict = 30,
 };
 
+const EventType = enum { request, response };
+
 pub const MsgType = enum(u8) {
     init,
     init_ok,
@@ -24,6 +26,13 @@ pub const MsgType = enum(u8) {
     pub fn str(self: MsgType) []const u8 {
         return switch (self) {
             inline else => |t| @tagName(t),
+        };
+    }
+
+    pub fn event(self: MsgType) EventType {
+        return switch (self) {
+            .init, .echo => .request,
+            .init_ok, .echo_ok, .@"error" => .response,
         };
     }
 };

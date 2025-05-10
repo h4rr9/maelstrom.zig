@@ -1,3 +1,12 @@
+fn echoHandler(msg: *const MsgBody, _: std.mem.Allocator) !MsgBody {
+    return .{
+        .echo_ok = .{
+            .echo = msg.echo.echo,
+            .in_reply_to = msg.echo.msg_id,
+        },
+    };
+}
+
 pub fn main() !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .{};
     const gpa = gpa_state.allocator();
@@ -10,18 +19,7 @@ pub fn main() !void {
     const stdin = std.io.getStdIn().reader();
 
     var node: Node(.{
-        .echo = .{
-            .handler = struct {
-                fn handler(msg: *const MsgBody) !MsgBody {
-                    return .{
-                        .echo_ok = .{
-                            .echo = msg.echo.echo,
-                            .in_reply_to = msg.echo.msg_id,
-                        },
-                    };
-                }
-            }.handler,
-        },
+        .echo = .getHandler(echoHandler),
     }) = .init(stdin.any(), stdout.any(), gpa);
     defer node.deinit();
 

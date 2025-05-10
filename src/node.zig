@@ -1,7 +1,11 @@
 pub const Handler = struct {
-    const none: Handler = .{ .handler = null };
+    const HandlerType = *const fn (msg: *const MsgBody, arena: std.mem.Allocator) anyerror!MsgBody;
+    handler: ?HandlerType,
 
-    handler: ?*const fn (msg: *const MsgBody) anyerror!MsgBody,
+    const none: Handler = .{ .handler = null };
+    pub fn getHandler(h: HandlerType) Handler {
+        return .{ .handler = h };
+    }
 };
 
 const RequestType = ScopedMsgType(.request);
@@ -23,51 +27,9 @@ pub fn Node(comptime handler_values: std.enums.EnumFieldStruct(RequestType, Hand
         in: std.io.AnyReader,
         out: std.io.AnyWriter,
         gpa: std.mem.Allocator,
+        arena_state: std.heap.ArenaAllocator,
 
         line: std.ArrayListUnmanaged(u8) = .empty,
-
-        fn handleInitMessage(node: *Self) !void {
-            var line = node.line.toManaged(node.gpa);
-            errdefer line.deinit();
-
-            try node.in.streamUntilDelimiter(line.writer(), '\n', null);
-            defer line.clearRetainingCapacity();
-
-            const parsed = try std.json.parseFromSlice(Message, node.gpa, line.items, .{ .ignore_unknown_fields = true });
-            defer parsed.deinit();
-
-            std.debug.assert(parsed.value.body == .init);
-
-            const response: Message = .{
-                .src = parsed.value.body.init.node_id,
-                .dest = parsed.value.src,
-                .body = .{
-                    .init_ok = .{
-                        .msg_id = 0,
-                        .in_reply_to = parsed.value.body.init.msg_id,
-                    },
-                },
-            };
-
-            try std.json.stringify(response, .{ .emit_null_optional_fields = false }, node.out);
-            try node.out.writeByte('\n');
-
-            node.* = .{
-                .nxt_msg_id = 1,
-                .id = try node.gpa.dupe(u8, parsed.value.body.init.node_id),
-                .node_ids = blk: {
-                    const node_ids = try node.gpa.alloc([]const u8, parsed.value.body.init.node_ids.len);
-                    for (node_ids, parsed.value.body.init.node_ids) |*node_id, nid| {
-                        node_id.* = try node.gpa.dupe(u8, nid);
-                    }
-                    break :blk node_ids;
-                },
-                .in = node.in,
-                .out = node.out,
-                .gpa = node.gpa,
-                .line = .initBuffer(line.allocatedSlice()),
-            };
-        }
 
         pub fn init(
             in: std.io.AnyReader,
@@ -78,67 +40,107 @@ pub fn Node(comptime handler_values: std.enums.EnumFieldStruct(RequestType, Hand
                 .in = in,
                 .out = out,
                 .gpa = gpa,
+                .arena_state = std.heap.ArenaAllocator.init(gpa),
                 .id = undefined,
                 .node_ids = undefined,
             };
         }
 
         pub fn deinit(node: *Self) void {
-            node.line.deinit(node.gpa);
             node.gpa.free(node.id);
+            node.line.deinit(node.gpa);
+            node.arena_state.deinit();
             for (node.node_ids) |node_id| node.gpa.free(node_id);
             node.gpa.free(node.node_ids);
         }
 
-        pub fn run(node: *Self) !void {
-            try node.handleInitMessage();
-
+        fn recv(node: *Self) !?Message {
             var line = node.line.toManaged(node.gpa);
             defer node.line = .initBuffer(line.allocatedSlice());
+            errdefer line.deinit();
 
-            loop: while (true) {
-                node.in.streamUntilDelimiter(line.writer(), '\n', null) catch |err| switch (err) {
-                    error.EndOfStream => return {},
-                    else => return err,
-                };
+            node.in.streamUntilDelimiter(line.writer(), '\n', null) catch |err| switch (err) {
+                error.EndOfStream => return null,
+                else => return err,
+            };
 
-                defer line.clearRetainingCapacity();
+            // NOTE: parsed is passed in arena, no need to deinit
+            // arena will be reset when next message is read
+            const parsed = try std.json.parseFromSlice(Message, node.arena_state.allocator(), line.items, .{ .ignore_unknown_fields = true });
+            return parsed.value;
+        }
 
-                const parsed = try std.json.parseFromSlice(Message, node.gpa, line.items, .{ .ignore_unknown_fields = true });
-                defer parsed.deinit();
+        fn send(node: *Self, req: Message, resp_body: MsgBody) !void {
+            node.nxt_msg_id += 1;
+            const message: Message = .{
+                .src = req.dest,
+                .dest = req.src,
+                .body = resp_body,
+            };
+            try std.json.stringify(message, .{ .emit_null_optional_fields = false }, node.out);
+            try node.out.writeByte('\n');
+            _ = node.arena_state.reset(.{ .retain_with_limit = 4 * 1024 * 1024 });
+        }
 
-                const response_body: MsgBody = switch (parsed.value.body) {
-                    .init_ok, .echo_ok, .@"error" => continue :loop,
-                    inline else => |body, tag| if (comptime node.handlers[@as(usize, @intFromEnum(tag.scoped(.request).?))].handler) |handler|
+        pub fn run(node: *Self) !void {
+            errdefer _ = node.arena_state.reset(.free_all);
+            var message = try node.recv() orelse return;
+
+            sw: switch (message.body) {
+                .init => |init_msg| {
+                    const resp_body: MsgBody = .{
+                        .init_ok = .{
+                            .msg_id = 0,
+                            .in_reply_to = init_msg.msg_id,
+                        },
+                    };
+
+                    node.nxt_msg_id = 1;
+                    node.id = try node.gpa.dupe(u8, init_msg.node_id);
+                    node.node_ids = blk: {
+                        const node_ids = try node.gpa.alloc([]const u8, init_msg.node_ids.len);
+                        for (node_ids, init_msg.node_ids) |*node_id, nid| {
+                            node_id.* = try node.gpa.dupe(u8, nid);
+                        }
+                        break :blk node_ids;
+                    };
+
+                    try node.send(message, resp_body);
+                    message = try node.recv() orelse return;
+                    continue :sw message.body;
+                },
+                inline else => |msg, tag| {
+                    const resp_body: MsgBody = if (comptime node.handlers[@as(usize, @intFromEnum(tag.scoped(.request).?))].handler) |handler|
                         @call(
                             .always_inline,
                             handler,
-                            .{&parsed.value.body},
+                            .{ &message.body, node.arena_state.allocator() },
                         ) catch |err| switch (err) {
                             else => .{
                                 .@"error" = .{
-                                    .in_reply_to = body.msg_id,
+                                    .in_reply_to = msg.msg_id,
                                     .code = .crash,
                                     .text = @errorName(err),
                                 },
                             },
                         }
                     else
-                        .{ .@"error" = .{
-                            .in_reply_to = body.msg_id,
-                            .code = .not_supported,
-                            .text = @tagName(tag) ++ " is not supported",
-                        } },
-                };
-                node.nxt_msg_id += 1;
+                        .{
+                            .@"error" = .{
+                                .in_reply_to = msg.msg_id,
+                                .code = .not_supported,
+                                .text = @tagName(tag) ++ " is not supported",
+                            },
+                        };
 
-                const message: Message = .{
-                    .src = parsed.value.dest,
-                    .dest = parsed.value.src,
-                    .body = response_body,
-                };
-                try std.json.stringify(message, .{ .emit_null_optional_fields = false }, node.out);
-                try node.out.writeByte('\n');
+                    try node.send(message, resp_body);
+                    message = try node.recv() orelse return;
+                    continue :sw message.body;
+                },
+                .init_ok, .echo_ok, .@"error" => {
+                    message = try node.recv() orelse return;
+                    continue :sw message.body;
+                },
             }
         }
     };
@@ -172,7 +174,7 @@ test "initMessage" {
     const out = buffer.writer();
     const in: DummyReader = .{ .context = &ctx };
     var node: Node(.{}) = .init(in.any(), out.any(), std.testing.allocator);
-    try node.handleInitMessage();
+    try node.run();
     defer node.deinit();
 
     const parsed = try std.json.parseFromSlice(Message, std.testing.allocator, buffer.items, .{});
@@ -191,7 +193,9 @@ test "run" {
     const in: DummyReader = .{ .context = &ctx };
     var node: Node(.{
         .echo = struct {
-            fn _handler(msg: *const MsgBody) !MsgBody {
+            fn _handler(msg: *const MsgBody, arena: std.mem.Allocator) !MsgBody {
+                // alloc for arena leak detection
+                _ = try arena.alloc(u8, 1);
                 return .{
                     .echo_ok = .{
                         .echo = msg.echo.echo,
@@ -257,7 +261,7 @@ test "crashed" {
     const in: DummyReader = .{ .context = &ctx };
     var node: Node(.{
         .echo = struct {
-            fn _handler(_: *const MsgBody) !MsgBody {
+            fn _handler(_: *const MsgBody, _: std.mem.Allocator) !MsgBody {
                 return error.NotImplemented;
             }
             pub fn handler() Handler {

@@ -70,11 +70,11 @@ pub fn Node(comptime handler_values: std.enums.EnumFieldStruct(RequestType, Hand
             return parsed.value;
         }
 
-        fn send(node: *Self, req: Message, resp_body: MsgBody) !void {
+        fn send(node: *Self, dest: []const u8, resp_body: MsgBody) !void {
             node.nxt_msg_id += 1;
             const message: Message = .{
-                .src = req.dest,
-                .dest = req.src,
+                .src = node.id,
+                .dest = dest,
                 .body = resp_body,
             };
             try std.json.stringify(message, .{ .emit_null_optional_fields = false }, node.out);
@@ -105,7 +105,7 @@ pub fn Node(comptime handler_values: std.enums.EnumFieldStruct(RequestType, Hand
                         break :blk node_ids;
                     };
 
-                    try node.send(message, resp_body);
+                    try node.send(message.src, resp_body);
                     message = try node.recv() orelse return;
                     continue :sw message.body;
                 },
@@ -133,11 +133,11 @@ pub fn Node(comptime handler_values: std.enums.EnumFieldStruct(RequestType, Hand
                             },
                         };
 
-                    try node.send(message, resp_body);
+                    try node.send(message.src, resp_body);
                     message = try node.recv() orelse return;
                     continue :sw message.body;
                 },
-                .init_ok, .echo_ok, .@"error" => {
+                .init_ok, .echo_ok, .topology_ok, .broadcast_ok, .read_ok, .@"error" => {
                     message = try node.recv() orelse return;
                     continue :sw message.body;
                 },

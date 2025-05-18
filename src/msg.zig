@@ -40,10 +40,22 @@ pub fn ScopedMsgType(comptime e: EventType) type {
 }
 
 pub const MsgType = enum(u8) {
+    // NOTE: do not change order of fields, add new fields
+    // to the end of reqeusts and responses
     init,
     echo,
+    topology,
+    broadcast,
+    read,
+
+    // responses
     init_ok,
     echo_ok,
+    topology_ok,
+    broadcast_ok,
+    read_ok,
+
+    // erorr
     @"error",
 
     pub fn str(self: MsgType) []const u8 {
@@ -54,8 +66,8 @@ pub const MsgType = enum(u8) {
 
     pub fn event(self: MsgType) EventType {
         return switch (self) {
-            .init, .echo => .request,
-            .init_ok, .echo_ok, .@"error" => .response,
+            .init, .echo, .topology, .broadcast, .read => .request,
+            .init_ok, .echo_ok, .topology_ok, .broadcast_ok, .read_ok, .@"error" => .response,
         };
     }
 
@@ -79,6 +91,63 @@ pub const MsgBody = union(MsgType) {
         msg_id: u32,
         echo: std.json.Value,
     },
+    topology: struct {
+        msg_id: u32,
+        topology: struct {
+            _topology: std.StringArrayHashMap([][]const u8),
+            const Self = @This();
+
+            pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, _: std.json.ParseOptions) !Self {
+                var map: std.StringArrayHashMap([][]const u8) = .init(allocator);
+                errdefer map.deinit();
+
+                if (source != .object)
+                    return error.UnexpectedToken;
+
+                var iter = source.object.iterator();
+                while (iter.next()) |entry| {
+                    if (entry.value_ptr.* != .array)
+                        return error.UnexpectedToken;
+                    const arr: std.json.Array = entry.value_ptr.array;
+
+                    const new_arr = try allocator.alloc([]const u8, arr.items.len);
+
+                    for (arr.items, new_arr) |x, *y| {
+                        if (x != .string)
+                            return error.UnexpectedToken;
+                        y.* = try allocator.dupe(u8, x.string);
+                    }
+
+                    try map.put(entry.key_ptr.*, new_arr);
+                }
+
+                return .{ ._topology = map };
+            }
+
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Self {
+                const parsed = try std.json.Value.jsonParse(allocator, source, options);
+                return Self.jsonParseFromValue(allocator, parsed, options);
+            }
+
+            pub fn jsonStringify(self: @This(), jws: anytype) !void {
+                try jws.beginObject();
+                var iter = self._topology.iterator();
+                while (iter.next()) |entry| {
+                    try jws.objectField(entry.key_ptr.*);
+                    try jws.write(entry.value_ptr);
+                }
+                try jws.endObject();
+            }
+        },
+    },
+    broadcast: struct {
+        msg_id: u32,
+        message: std.json.Value,
+    },
+    read: struct {
+        msg_id: u32,
+    },
+
     init_ok: struct {
         msg_id: ?u32 = null,
         in_reply_to: u32,
@@ -86,6 +155,19 @@ pub const MsgBody = union(MsgType) {
     echo_ok: struct {
         msg_id: ?u32 = null,
         echo: std.json.Value,
+        in_reply_to: u32,
+    },
+    topology_ok: struct {
+        msg_id: ?u32,
+        in_reply_to: u32,
+    },
+    broadcast_ok: struct {
+        msg_id: ?u32,
+        in_reply_to: u32,
+    },
+    read_ok: struct {
+        messages: []std.json.Value,
+        msg_id: ?u32,
         in_reply_to: u32,
     },
     @"error": struct {
@@ -141,6 +223,8 @@ pub const MsgBody = union(MsgType) {
                 var r: B = undefined;
 
                 inline for (std.meta.fields(B)) |Field| {
+                    if (Field.type == void) continue;
+
                     const val = map.get(Field.name);
 
                     @field(r, Field.name) = blk: {
@@ -325,4 +409,47 @@ test "echo_ok" {
 
     try std.json.stringify(parsed.value, .{ .emit_null_optional_fields = false, .whitespace = .indent_2 }, buffer.writer());
     try std.testing.expectEqualStrings(echo_json_str, buffer.items);
+}
+
+test "broadcast" {
+    const broadcast_json_str =
+        \\{
+        \\  "src": "x",
+        \\  "dest": "y",
+        \\  "body": {
+        \\    "type": "topology",
+        \\    "msg_id": 123,
+        \\    "topology": {
+        \\      "nodeA": [
+        \\        "nodeB",
+        \\        "nodeC"
+        \\      ],
+        \\      "nodeB": [
+        \\        "nodeD"
+        \\      ],
+        \\      "nodeC": [
+        \\        "nodeD",
+        \\        "nodeE"
+        \\      ]
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const expected_init_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, broadcast_json_str, .{});
+    defer expected_init_json.deinit();
+
+    var parsed = try std.json.parseFromValue(Message, std.testing.allocator, expected_init_json.value, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.body == .topology);
+    try std.testing.expect(parsed.value.body.topology.msg_id == 123);
+
+    try std.testing.expectEqual(3, parsed.value.body.topology.topology._topology.count());
+
+    var buffer: std.ArrayList(u8) = try .initCapacity(std.testing.allocator, broadcast_json_str.len);
+    defer buffer.deinit();
+
+    try std.json.stringify(parsed.value, .{ .emit_null_optional_fields = false, .whitespace = .indent_2 }, buffer.writer());
+    try std.testing.expectEqualStrings(broadcast_json_str, buffer.items);
 }

@@ -1,12 +1,3 @@
-fn echoHandler(msg: *const MsgBody, _: std.mem.Allocator) !MsgBody {
-    return .{
-        .echo_ok = .{
-            .echo = msg.echo.echo,
-            .in_reply_to = msg.echo.msg_id,
-        },
-    };
-}
-
 pub fn main() !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .{};
     const gpa = gpa_state.allocator();
@@ -18,15 +9,16 @@ pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
 
-    var node: Node(.{
-        .echo = .getHandler(echoHandler),
-    }) = .init(stdin.any(), stdout.any(), gpa);
+    var node: Node = .init(stdin.any(), stdout.any(), gpa);
     defer node.deinit();
 
     try node.run();
 }
 
 const std = @import("std");
-const lib = @import("lib");
-const Node = lib.Node;
-const MsgBody = lib.MsgBody;
+const Node = @import("Node.zig");
+
+test {
+    _ = @import("Node.zig");
+    _ = @import("msg.zig");
+}

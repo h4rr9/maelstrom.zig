@@ -39,6 +39,8 @@ pub fn ScopedMsgType(comptime e: EventType) type {
     } });
 }
 
+pub const RequestType = ScopedMsgType(.request);
+
 pub const MsgType = enum(u8) {
     // NOTE: do not change order of fields, add new fields
     // to the end of reqeusts and responses

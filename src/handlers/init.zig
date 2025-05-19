@@ -3,9 +3,8 @@ pub fn handler(node: *Node, msg: *const MsgBody, _: std.mem.Allocator) !MsgBody 
     node.id = try node.gpa.dupe(u8, msg.init.node_id);
     node.node_ids = blk: {
         const node_ids = try node.gpa.alloc([]const u8, msg.init.node_ids.len);
-        for (node_ids, msg.init.node_ids) |*node_id, nid| {
+        for (node_ids, msg.init.node_ids) |*node_id, nid|
             node_id.* = try node.gpa.dupe(u8, nid);
-        }
         break :blk node_ids;
     };
 

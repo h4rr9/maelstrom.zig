@@ -11,6 +11,9 @@ pub const HandlerArray = [std.enums.directEnumArrayLen(RequestType, 0)]Handler;
 pub const default_handlers: Handlers = .{
     .init = .{ .handler = @import("handlers/init.zig").handler },
     .echo = .{ .handler = @import("handlers/echo.zig").handler },
+    .topology = .{ .handler = @import("handlers/topology.zig").handler },
+    .broadcast = .{ .handler = @import("handlers/broadcast.zig").handler },
+    .read = .{ .handler = @import("handlers/read.zig").handler },
 };
 
 pub fn customhandlers(h: Handlers) HandlerArray {

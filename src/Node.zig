@@ -2,7 +2,9 @@ const Node = @This();
 
 nxt_msg_id: u32 = 0,
 id: []const u8,
-node_ids: [][]const u8,
+node_ids: [][]const u8 = &.{},
+neighbours: [][]const u8 = &.{},
+messages: std.StringArrayHashMapUnmanaged(void) = .empty,
 
 handlers: HandlerArray,
 // comptime callbacks: std.enums.directEnumArray(RequestType, ?Handler, 0, .{}),
@@ -13,6 +15,8 @@ gpa: std.mem.Allocator,
 arena_state: std.heap.ArenaAllocator,
 
 line: std.ArrayListUnmanaged(u8) = .empty,
+
+lock: std.Thread.Mutex = .{},
 
 pub fn init(
     in: std.io.AnyReader,
@@ -39,7 +43,6 @@ pub fn initWithHandlers(
         .gpa = gpa,
         .arena_state = std.heap.ArenaAllocator.init(gpa),
         .id = undefined,
-        .node_ids = &.{},
         .handlers = customHandlers(new_handlers),
     };
 }
@@ -49,10 +52,12 @@ pub fn deinit(node: *Node) void {
     node.line.deinit(node.gpa);
     node.arena_state.deinit();
     for (node.node_ids) |node_id| node.gpa.free(node_id);
+    for (node.neighbours) |node_id| node.gpa.free(node_id);
     node.gpa.free(node.node_ids);
+    node.gpa.free(node.neighbours);
 }
 
-fn recv(node: *Node) !?Message {
+pub fn recv(node: *Node) !?Message {
     var line = node.line.toManaged(node.gpa);
     defer node.line = .initBuffer(line.allocatedSlice());
     errdefer line.deinit();
@@ -68,15 +73,19 @@ fn recv(node: *Node) !?Message {
     return parsed.value;
 }
 
-fn send(node: *Node, dest: []const u8, resp_body: MsgBody) !void {
-    node.nxt_msg_id += 1;
+pub fn send(node: *Node, dest: []const u8, resp_body: MsgBody) !void {
     const message: Message = .{
         .src = node.id,
         .dest = dest,
         .body = resp_body,
     };
-    try std.json.stringify(message, .{ .emit_null_optional_fields = false }, node.out);
-    try node.out.writeByte('\n');
+    {
+        node.lock.lock();
+        defer node.lock.unlock();
+        node.nxt_msg_id += 1;
+        try std.json.stringify(message, .{ .emit_null_optional_fields = false }, node.out);
+        try node.out.writeByte('\n');
+    }
     _ = node.arena_state.reset(.{ .retain_with_limit = 4 * 1024 * 1024 });
 }
 

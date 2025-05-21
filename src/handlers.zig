@@ -7,7 +7,6 @@ pub const Handler = struct {
 };
 
 pub const HandlerImpls = std.enums.EnumFieldStruct(RequestType, Handler, .none);
-// pub const HandlerArray = [std.enums.directEnumArrayLen(RequestType, 0)]Handler;
 
 pub const default_handler_impls: HandlerImpls = .{
     .init = .{ .handlerFn = @import("handlers/init.zig").handler },
@@ -15,6 +14,7 @@ pub const default_handler_impls: HandlerImpls = .{
     .topology = .{ .handlerFn = @import("handlers/topology.zig").handler },
     .broadcast = .{ .handlerFn = @import("handlers/broadcast.zig").handler },
     .read = .{ .handlerFn = @import("handlers/read.zig").handler },
+    .generate = .{ .handlerFn = @import("handlers/generate.zig").handler },
 };
 
 pub const Handlers = struct {
@@ -57,10 +57,6 @@ pub const Handlers = struct {
         _ = node.arena_state.reset(.{ .retain_with_limit = 4 * 1024 * 1024 });
     }
 };
-
-// pub fn customhandlers(h: Handlers) HandlerArray {
-//     return std.enums.directEnumArrayDefault(RequestType, Handler, .none, 0, h);
-// }
 
 pub const default_handlers: Handlers = .{ .impls = default_handler_impls };
 

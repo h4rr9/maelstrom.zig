@@ -106,6 +106,7 @@ pub fn run(node: *Node) !void {
             .topology_ok,
             .broadcast_ok,
             .read_ok,
+            .generate_ok,
             .@"error",
             => {
                 message = try node.recv() orelse return;

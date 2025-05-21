@@ -49,6 +49,7 @@ pub const MsgType = enum(u8) {
     topology,
     broadcast,
     read,
+    generate,
 
     // responses
     init_ok,
@@ -56,6 +57,7 @@ pub const MsgType = enum(u8) {
     topology_ok,
     broadcast_ok,
     read_ok,
+    generate_ok,
 
     // erorr
     @"error",
@@ -68,8 +70,8 @@ pub const MsgType = enum(u8) {
 
     pub fn event(self: MsgType) EventType {
         return switch (self) {
-            .init, .echo, .topology, .broadcast, .read => .request,
-            .init_ok, .echo_ok, .topology_ok, .broadcast_ok, .read_ok, .@"error" => .response,
+            .init, .echo, .topology, .broadcast, .read, .generate => .request,
+            .init_ok, .echo_ok, .topology_ok, .broadcast_ok, .read_ok, .generate_ok, .@"error" => .response,
         };
     }
 
@@ -149,6 +151,7 @@ pub const Body = union(MsgType) {
     read: struct {
         msg_id: u32,
     },
+    generate: struct { msg_id: u32 },
 
     init_ok: struct {
         msg_id: ?u32 = null,
@@ -169,6 +172,11 @@ pub const Body = union(MsgType) {
     },
     read_ok: struct {
         messages: []std.json.Value,
+        msg_id: ?u32,
+        in_reply_to: u32,
+    },
+    generate_ok: struct {
+        id: std.json.Value,
         msg_id: ?u32,
         in_reply_to: u32,
     },

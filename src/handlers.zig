@@ -1,28 +1,71 @@
-const HandlerType = *const fn (node: *Node, msg: *const MsgBody, arena: std.mem.Allocator) anyerror!MsgBody;
+const HandlerType = *const fn (node: *Node, message: *const Message, arena: std.mem.Allocator) anyerror!Body;
 
 pub const Handler = struct {
-    handler: ?HandlerType,
-    pub const none: @This() = .{ .handler = null };
+    handlerFn: ?HandlerType,
+
+    pub const none: @This() = .{ .handlerFn = null };
 };
 
-pub const Handlers = std.enums.EnumFieldStruct(RequestType, Handler, .none);
-pub const HandlerArray = [std.enums.directEnumArrayLen(RequestType, 0)]Handler;
+pub const HandlerImpls = std.enums.EnumFieldStruct(RequestType, Handler, .none);
+// pub const HandlerArray = [std.enums.directEnumArrayLen(RequestType, 0)]Handler;
 
-pub const default_handlers: Handlers = .{
-    .init = .{ .handler = @import("handlers/init.zig").handler },
-    .echo = .{ .handler = @import("handlers/echo.zig").handler },
-    .topology = .{ .handler = @import("handlers/topology.zig").handler },
-    .broadcast = .{ .handler = @import("handlers/broadcast.zig").handler },
-    .read = .{ .handler = @import("handlers/read.zig").handler },
+pub const default_handler_impls: HandlerImpls = .{
+    .init = .{ .handlerFn = @import("handlers/init.zig").handler },
+    .echo = .{ .handlerFn = @import("handlers/echo.zig").handler },
+    .topology = .{ .handlerFn = @import("handlers/topology.zig").handler },
+    .broadcast = .{ .handlerFn = @import("handlers/broadcast.zig").handler },
+    .read = .{ .handlerFn = @import("handlers/read.zig").handler },
 };
 
-pub fn customhandlers(h: Handlers) HandlerArray {
-    return std.enums.directEnumArrayDefault(RequestType, Handler, .none, 0, h);
-}
+pub const Handlers = struct {
+    impls: HandlerImpls,
 
-pub const handlers = customhandlers(default_handlers);
+    pub fn handler(
+        self: *const Handlers,
+        node: *Node,
+        message: *const Message,
+        arena: std.mem.Allocator,
+        comptime handler_tag: RequestType,
+    ) !void {
+        const handler_impl = @field(self.impls, @tagName(handler_tag));
+        const msg = @field(message.body, @tagName(handler_tag));
 
-const MsgBody = @import("msg.zig").MsgBody;
+        const response_body: Body = if (handler_impl.handlerFn) |hfn|
+            @call(
+                .auto,
+                hfn,
+                .{ node, message, arena },
+            ) catch |err| switch (err) {
+                else => .{
+                    .@"error" = .{
+                        .in_reply_to = msg.msg_id,
+                        .code = .crash,
+                        .text = @errorName(err),
+                    },
+                },
+            }
+        else
+            .{
+                .@"error" = .{
+                    .in_reply_to = msg.msg_id,
+                    .code = .not_supported,
+                    .text = @tagName(handler_tag) ++ " is not supported",
+                },
+            };
+
+        try node.send(message.src, response_body, handler_tag);
+        _ = node.arena_state.reset(.{ .retain_with_limit = 4 * 1024 * 1024 });
+    }
+};
+
+// pub fn customhandlers(h: Handlers) HandlerArray {
+//     return std.enums.directEnumArrayDefault(RequestType, Handler, .none, 0, h);
+// }
+
+pub const default_handlers: Handlers = .{ .impls = default_handler_impls };
+
+const Message = @import("msg.zig").Message;
+const Body = @import("msg.zig").Body;
 const RequestType = @import("msg.zig").RequestType;
 const Node = @import("Node.zig");
 const std = @import("std");

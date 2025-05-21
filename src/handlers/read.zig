@@ -1,4 +1,5 @@
-pub fn handler(node: *Node, msg: *const MsgBody, arena: std.mem.Allocator) !MsgBody {
+pub fn handler(node: *Node, message: *const Message, arena: std.mem.Allocator) !Body {
+    const msg = message.body.read;
     // handler arena will take care of allocations
 
     var msgs: std.ArrayListUnmanaged(std.json.Value) = try .initCapacity(arena, node.messages.count());
@@ -11,11 +12,12 @@ pub fn handler(node: *Node, msg: *const MsgBody, arena: std.mem.Allocator) !MsgB
         .read_ok = .{
             .messages = msgs.items,
             .msg_id = node.nxt_msg_id,
-            .in_reply_to = msg.read.msg_id,
+            .in_reply_to = msg.msg_id,
         },
     };
 }
 
 const Node = @import("../Node.zig");
-const MsgBody = @import("../msg.zig").MsgBody;
+const Message = @import("../msg.zig").Message;
+const Body = @import("../msg.zig").Body;
 const std = @import("std");

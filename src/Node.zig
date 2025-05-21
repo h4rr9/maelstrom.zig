@@ -6,7 +6,7 @@ node_ids: [][]const u8 = &.{},
 neighbours: [][]const u8 = &.{},
 messages: std.StringArrayHashMapUnmanaged(void) = .empty,
 
-handlers: HandlerArray,
+handlers: Handlers,
 // comptime callbacks: std.enums.directEnumArray(RequestType, ?Handler, 0, .{}),
 
 in: std.io.AnyReader,
@@ -23,18 +23,18 @@ pub fn init(
     out: std.io.AnyWriter,
     gpa: std.mem.Allocator,
 ) @This() {
-    return .initWithHandlers(in, out, gpa, default_handlers);
+    return .initWithHandlers(in, out, gpa, default_handler_impls);
 }
 
 pub fn initWithHandlers(
     in: std.io.AnyReader,
     out: std.io.AnyWriter,
     gpa: std.mem.Allocator,
-    handlers: Handlers,
+    handler_impls: HandlerImpls,
 ) @This() {
-    var new_handlers = handlers;
-    if (handlers.init.handler == null) {
-        new_handlers.init = default_handlers.init;
+    var new_handler_impls = handler_impls;
+    if (handler_impls.init.handlerFn == null) {
+        new_handler_impls.init = default_handler_impls.init;
     }
 
     return .{
@@ -43,7 +43,7 @@ pub fn initWithHandlers(
         .gpa = gpa,
         .arena_state = std.heap.ArenaAllocator.init(gpa),
         .id = undefined,
-        .handlers = customHandlers(new_handlers),
+        .handlers = .{ .impls = new_handler_impls },
     };
 }
 
@@ -73,7 +73,14 @@ pub fn recv(node: *Node) !?Message {
     return parsed.value;
 }
 
-pub fn send(node: *Node, dest: []const u8, resp_body: MsgBody) !void {
+pub fn send(node: *Node, dest: []const u8, resp_body: Body, comptime request_tag: ?RequestType) !void {
+
+    // if .init errors out node.id is undefined
+    // set it to duped string so json.stringify
+    // and deinit do not error out.
+    if ((comptime (request_tag != null and request_tag.? == .init)) and resp_body == .@"error")
+        node.id = try node.gpa.dupe(u8, "<undefined>");
+
     const message: Message = .{
         .src = node.id,
         .dest = dest,
@@ -86,53 +93,28 @@ pub fn send(node: *Node, dest: []const u8, resp_body: MsgBody) !void {
         try std.json.stringify(message, .{ .emit_null_optional_fields = false }, node.out);
         try node.out.writeByte('\n');
     }
-    _ = node.arena_state.reset(.{ .retain_with_limit = 4 * 1024 * 1024 });
 }
 
 pub fn run(node: *Node) !void {
     errdefer _ = node.arena_state.reset(.free_all);
     var message = try node.recv() orelse return;
 
-    sw: switch (message.body) {
-        inline else => |msg, tag| {
-            const resp_body: MsgBody = if (node.handlers[@as(usize, @intFromEnum(tag.scoped(.request).?))].handler) |handler|
-                @call(
-                    .auto,
-                    handler,
-                    .{ node, &message.body, node.arena_state.allocator() },
-                ) catch |err| switch (err) {
-                    else => .{
-                        .@"error" = .{
-                            .in_reply_to = msg.msg_id,
-                            .code = .crash,
-                            .text = @errorName(err),
-                        },
-                    },
-                }
-            else
-                .{
-                    .@"error" = .{
-                        .in_reply_to = msg.msg_id,
-                        .code = .not_supported,
-                        .text = @tagName(tag) ++ " is not supported",
-                    },
-                };
-
-            // if .init errors out node.id is undefined
-            // set it to duped string so json.stringify
-            // and deinit do not error out.
-            if ((comptime tag == .init) and resp_body == .@"error")
-                node.id = try node.gpa.dupe(u8, "<undefined>");
-
-            try node.send(message.src, resp_body);
-            message = try node.recv() orelse return;
-            continue :sw message.body;
-        },
-        .init_ok, .echo_ok, .topology_ok, .broadcast_ok, .read_ok, .@"error" => {
-            message = try node.recv() orelse return;
-            continue :sw message.body;
-        },
-    }
+    while (true)
+        switch (std.meta.activeTag(message.body)) {
+            .init_ok,
+            .echo_ok,
+            .topology_ok,
+            .broadcast_ok,
+            .read_ok,
+            .@"error",
+            => {
+                message = try node.recv() orelse return;
+            },
+            inline else => |tag| {
+                try node.handlers.handler(node, &message, node.arena_state.allocator(), tag.scoped(.request).?);
+                message = try node.recv() orelse return;
+            },
+        };
 }
 
 const INIT_JSON_STR =
@@ -182,19 +164,20 @@ test "run" {
     const in: DummyReader = .{ .context = &ctx };
     var node: Node = .initWithHandlers(in.any(), out.any(), std.testing.allocator, .{
         .echo = struct {
-            fn _handler(_: *Node, msg: *const MsgBody, arena: std.mem.Allocator) !MsgBody {
+            fn _handler(_: *Node, message: *const Message, arena: std.mem.Allocator) !Body {
                 // alloc for arena leak detection
                 _ = try arena.alloc(u8, 1);
+                const msg = message.body.echo;
                 return .{
                     .echo_ok = .{
-                        .echo = msg.echo.echo,
-                        .in_reply_to = msg.echo.msg_id,
+                        .echo = msg.echo,
+                        .in_reply_to = msg.msg_id,
                     },
                 };
             }
 
             pub fn handler() Handler {
-                return .{ .handler = _handler };
+                return .{ .handlerFn = _handler };
             }
         }.handler(),
     });
@@ -242,11 +225,11 @@ test "crashed" {
     const in: DummyReader = .{ .context = &ctx };
     var node: Node = .initWithHandlers(in.any(), out.any(), std.testing.allocator, .{
         .echo = struct {
-            fn _handler(_: *Node, _: *const MsgBody, _: std.mem.Allocator) !MsgBody {
+            fn _handler(_: *Node, _: *const Message, _: std.mem.Allocator) !Body {
                 return error.NotImplemented;
             }
             pub fn handler() Handler {
-                return .{ .handler = _handler };
+                return .{ .handlerFn = _handler };
             }
         }.handler(),
     });
@@ -267,12 +250,12 @@ test "crashed" {
 const std = @import("std");
 const builtin = @import("builtin");
 const Message = @import("msg.zig").Message;
-const MsgBody = @import("msg.zig").MsgBody;
+const Body = @import("msg.zig").Body;
 const RequestType = @import("msg.zig").RequestType;
 const ScopedMsgType = @import("msg.zig").ScopedMsgType;
 const customHandlers = @import("handlers.zig").customhandlers;
-const Handlers = @import("handlers.zig").Handlers;
 const Handler = @import("handlers.zig").Handler;
-const HandlerArray = @import("handlers.zig").HandlerArray;
-const handlers_array = @import("handlers.zig").handlers;
+const HandlerImpls = @import("handlers.zig").HandlerImpls;
+const Handlers = @import("handlers.zig").Handlers;
 const default_handlers = @import("handlers.zig").default_handlers;
+const default_handler_impls = @import("handlers.zig").default_handler_impls;

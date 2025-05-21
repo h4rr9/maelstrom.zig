@@ -83,7 +83,7 @@ pub const MsgType = enum(u8) {
     }
 };
 
-pub const MsgBody = union(MsgType) {
+pub const Body = union(MsgType) {
     init: struct {
         msg_id: u32,
         node_id: []const u8,
@@ -252,7 +252,7 @@ pub const MsgBody = union(MsgType) {
 pub const Message = struct {
     src: []const u8,
     dest: []const u8,
-    body: MsgBody,
+    body: Body,
 };
 
 test "init" {
